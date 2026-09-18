@@ -473,10 +473,19 @@ footer{
               <button class="btn ghost" id="printReportBtn">🖨️ พิมพ์รายงาน</button>
             </div>
             <div style="margin-top:14px; padding-top:14px; border-top:1px solid var(--line);">
-              <label style="display:block; font-size:.82rem; color:var(--ink-soft); margin-bottom:6px;">ชื่องาน/ท่าที่ประเมิน (ไม่บังคับ — ใส่ไว้ถ้าจะประเมินหลายงานของคนเดียวกัน)</label>
-              <input type="text" id="taskLabelInput" placeholder="เช่น นั่งพิมพ์งานที่โต๊ะ, ยกกล่องขึ้นชั้นวาง" maxlength="60"
-                style="width:100%; box-sizing:border-box; border:1px solid var(--line); background:var(--surface); color:var(--ink); border-radius:10px; padding:10px 12px; min-height:44px; font-size:.9rem; margin-bottom:10px;">
-              <button class="btn ghost" id="saveHistoryBtn">🗂️ บันทึกท่านี้ลงประวัติ</button>
+              <div class="field-row">
+                <div>
+                  <label style="display:block; font-size:.82rem; color:var(--ink-soft); margin-bottom:6px;">ชื่อผู้ถูกประเมิน (ไม่บังคับ — ใส่ไว้ถ้าประเมินหลายคน)</label>
+                  <input type="text" id="personNameInput" placeholder="เช่น สมชาย ใจดี" maxlength="60"
+                    style="width:100%; box-sizing:border-box; border:1px solid var(--line); background:var(--surface); color:var(--ink); border-radius:10px; padding:10px 12px; min-height:44px; font-size:.9rem;">
+                </div>
+                <div>
+                  <label style="display:block; font-size:.82rem; color:var(--ink-soft); margin-bottom:6px;">ชื่องาน/ท่าที่ประเมิน (ไม่บังคับ)</label>
+                  <input type="text" id="taskLabelInput" placeholder="เช่น นั่งพิมพ์งานที่โต๊ะ, ยกกล่องขึ้นชั้นวาง" maxlength="60"
+                    style="width:100%; box-sizing:border-box; border:1px solid var(--line); background:var(--surface); color:var(--ink); border-radius:10px; padding:10px 12px; min-height:44px; font-size:.9rem;">
+                </div>
+              </div>
+              <button class="btn ghost" id="saveHistoryBtn" style="margin-top:6px;">🗂️ บันทึกท่านี้ลงประวัติ</button>
               <span id="saveHistoryMsg" style="font-size:.8rem; color:var(--risk-good); margin-left:8px;"></span>
             </div>
           </div>
@@ -494,6 +503,7 @@ footer{
             <input type="file" id="importHistoryInput" accept="application/json,.json" style="display:none;">
             <button class="btn ghost" id="compareHistoryBtn" style="font-size:.82rem; display:none;">🔍 เปรียบเทียบ 2 รายการที่เลือก</button>
           </div>
+          <div id="trendChartContainer"></div>
         </div>
         <div class="panel-pad" style="padding-top:0;" id="historyList">
           <p style="color:var(--ink-soft); font-size:.85rem; margin:0;">ยังไม่มีประวัติที่บันทึกไว้ในเบราว์เซอร์นี้ — ประวัติเก็บไว้เฉพาะในเครื่อง/เบราว์เซอร์นี้เท่านั้น ไม่ถูกส่งขึ้นที่ใด</p>
@@ -1857,7 +1867,68 @@ state.compareSelection = [];
 function escapeHtml(s){
   return String(s||'').replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 }
+/* Trend chart: normalized to % of each method's max score so RULA (max 7),
+   REBA (max 15) and ROSA (max 10) plot meaningfully on one shared axis. */
+function buildTrendChartSVG(entriesAsc){
+  const W = 640, H = 260, padL = 34, padR = 12, padT = 14, padB = 34;
+  const plotW = W - padL - padR, plotH = H - padT - padB;
+  const n = entriesAsc.length;
+  const xStep = n>1 ? plotW/(n-1) : 0;
+  const xFor = (i)=> padL + xStep*i;
+  const yFor = (pct)=> padT + plotH * (1 - clamp(pct,0,100)/100);
+
+  const seriesDefs = [
+    {label:'RULA', max:7,  color:'#1f6f6b', get:(h)=>h.rula.grand},
+    {label:'REBA', max:15, color:'#b5822a', get:(h)=>h.reba.final},
+    {label:'ROSA', max:10, color:'#7a5c9e', get:(h)=>h.rosa.final}
+  ];
+
+  let svg = `<svg viewBox="0 0 ${W} ${H}" style="width:100%; height:auto; display:block;">`;
+  [0,25,50,75,100].forEach(p=>{
+    const y = yFor(p);
+    svg += `<line x1="${padL}" y1="${y}" x2="${W-padR}" y2="${y}" stroke="var(--line)" stroke-width="1"/>`;
+    svg += `<text x="${padL-6}" y="${y+3}" font-size="9" fill="var(--ink-soft)" text-anchor="end">${p}%</text>`;
+  });
+  const labelEvery = Math.max(1, Math.ceil(n/7));
+  entriesAsc.forEach((h,i)=>{
+    if(i % labelEvery !== 0 && i !== n-1) return;
+    const d = new Date(h.timestamp);
+    const label = d.toLocaleDateString('th-TH', {day:'numeric', month:'short'});
+    svg += `<text x="${xFor(i)}" y="${H-padB+16}" font-size="9" fill="var(--ink-soft)" text-anchor="middle">${label}</text>`;
+  });
+  seriesDefs.forEach(s=>{
+    const pts = entriesAsc.map((h,i)=> `${xFor(i)},${yFor(s.get(h)/s.max*100)}`).join(' ');
+    svg += `<polyline points="${pts}" fill="none" stroke="${s.color}" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>`;
+    entriesAsc.forEach((h,i)=>{
+      const val = s.get(h);
+      svg += `<circle cx="${xFor(i)}" cy="${yFor(val/s.max*100)}" r="3.5" fill="${s.color}"><title>${s.label} ${val}/${s.max} — ${escapeHtml(h.taskLabel||'')} (${new Date(h.timestamp).toLocaleDateString('th-TH')})</title></circle>`;
+    });
+  });
+  svg += `</svg>`;
+  return svg;
+}
+function renderTrendChart(){
+  const container = $('#trendChartContainer');
+  if(!container) return;
+  if(state.history.length < 2){
+    container.innerHTML = '';
+    return;
+  }
+  const entriesAsc = [...state.history].sort((a,b)=> new Date(a.timestamp)-new Date(b.timestamp));
+  container.innerHTML = `
+    <div style="margin-bottom:14px; padding-bottom:14px; border-bottom:1px solid var(--line);">
+      <div style="font-weight:600; font-size:.88rem; margin-bottom:8px;">แนวโน้มคะแนน (% ของคะแนนเต็มแต่ละวิธี — ยิ่งต่ำยิ่งดี)</div>
+      ${buildTrendChartSVG(entriesAsc)}
+      <div style="display:flex; gap:14px; flex-wrap:wrap; margin-top:8px; font-size:.78rem; color:var(--ink-soft);">
+        <span style="display:inline-flex; align-items:center; gap:5px;"><span style="width:10px;height:10px;border-radius:50%;background:#1f6f6b;display:inline-block;"></span>RULA</span>
+        <span style="display:inline-flex; align-items:center; gap:5px;"><span style="width:10px;height:10px;border-radius:50%;background:#b5822a;display:inline-block;"></span>REBA</span>
+        <span style="display:inline-flex; align-items:center; gap:5px;"><span style="width:10px;height:10px;border-radius:50%;background:#7a5c9e;display:inline-block;"></span>ROSA</span>
+      </div>
+    </div>`;
+}
+
 function renderHistory(){
+  renderTrendChart();
   const el = $('#historyList');
   if(!el) return;
   if(!state.history.length){
@@ -1868,8 +1939,9 @@ function renderHistory(){
   el.innerHTML = state.history.map(h=>{
     const d = new Date(h.timestamp);
     const dateStr = d.toLocaleDateString('th-TH') + ' ' + d.toLocaleTimeString('th-TH',{hour:'2-digit',minute:'2-digit'});
-    const titleLine = h.taskLabel ? escapeHtml(h.taskLabel) : dateStr;
-    const subLine = h.taskLabel ? `${dateStr} · ฝั่ง${h.sideName==='left'?'ซ้าย':'ขวา'}` : `ฝั่ง${h.sideName==='left'?'ซ้าย':'ขวา'}`;
+    const titleParts = [h.personName, h.taskLabel].filter(Boolean).map(escapeHtml);
+    const titleLine = titleParts.length ? titleParts.join(' · ') : dateStr;
+    const subLine = titleParts.length ? `${dateStr} · ฝั่ง${h.sideName==='left'?'ซ้าย':'ขวา'}` : `ฝั่ง${h.sideName==='left'?'ซ้าย':'ขวา'}`;
     const checked = state.compareSelection.includes(h.id) ? 'checked' : '';
     return `<div class="history-item" data-id="${h.id}">
       <input type="checkbox" class="compare-check" data-compare="${h.id}" ${checked} title="เลือกเพื่อเปรียบเทียบ" style="width:19px;height:19px; accent-color:var(--accent); flex:none;">
@@ -1985,10 +2057,11 @@ function compareArrow(a, b){
 function compareColumn(h){
   const d = new Date(h.timestamp);
   const dateStr = d.toLocaleDateString('th-TH') + ' ' + d.toLocaleTimeString('th-TH',{hour:'2-digit',minute:'2-digit'});
+  const titleParts = [h.personName, h.taskLabel].filter(Boolean).map(escapeHtml);
   return `
     <div style="flex:1; min-width:200px;">
       ${h.thumb?`<img src="${h.thumb}" style="width:100%; max-width:220px; border-radius:8px; border:1px solid var(--line); display:block; margin-bottom:8px;">`:''}
-      <div style="font-weight:700; margin-bottom:2px;">${h.taskLabel?escapeHtml(h.taskLabel):'(ไม่ได้ตั้งชื่องาน)'}</div>
+      <div style="font-weight:700; margin-bottom:2px;">${titleParts.length?titleParts.join(' · '):'(ไม่ได้ตั้งชื่อ)'}</div>
       <div style="font-size:.78rem; color:var(--ink-soft); margin-bottom:8px;">${dateStr}</div>
       <table style="width:100%; font-size:.85rem; border-collapse:collapse;">
         <tr><td style="padding:4px 0;">RULA</td><td style="text-align:right;"><span class="score-chip ${chipClass(h.rula.grand,7)}">${h.rula.grand}</span></td></tr>
@@ -2034,18 +2107,20 @@ $('#saveHistoryBtn').addEventListener('click', async ()=>{
   if(!state.captured) return;
   const thumb = state.captured.frameImage ? await resizeImage(state.captured.frameImage, 160) : null;
   const taskLabel = ($('#taskLabelInput').value || '').trim().slice(0,60);
+  const personName = ($('#personNameInput').value || '').trim().slice(0,60);
   const entry = {
     id: Date.now(),
     timestamp: new Date().toISOString(),
     sideName: state.captured.sideName,
     taskLabel,
+    personName,
     rula: computeRULA(state.captured, state.manual.rula),
     reba: computeREBA(state.captured, state.manual.reba),
     rosa: computeROSA(state.captured, state.manual.rosa),
     thumb
   };
   state.history.unshift(entry);
-  if(state.history.length>30) state.history.length = 30;
+  if(state.history.length>100) state.history.length = 100;
   const ok = persistHistory();
   renderHistory();
   const msg = $('#saveHistoryMsg');
@@ -2098,7 +2173,8 @@ function getReportData(){
 
   return {
     timestamp:new Date(), cap, rula, reba, rosa, rulaAct, rebaAct, rosaAct, recommendations:recs,
-    taskLabel: (($('#taskLabelInput') && $('#taskLabelInput').value) || '').trim().slice(0,60)
+    taskLabel: (($('#taskLabelInput') && $('#taskLabelInput').value) || '').trim().slice(0,60),
+    personName: (($('#personNameInput') && $('#personNameInput').value) || '').trim().slice(0,60)
   };
 }
 
@@ -2107,12 +2183,13 @@ function reportScoreRow(label, score, max){
 }
 function buildReportHTML(data){
   if(!data) return '<p>ยังไม่มีข้อมูลการประเมิน</p>';
-  const {cap, rula, reba, rosa, rulaAct, rebaAct, rosaAct, recommendations, taskLabel} = data;
+  const {cap, rula, reba, rosa, rulaAct, rebaAct, rosaAct, recommendations, taskLabel, personName} = data;
   const img = cap.frameImage ? `<img src="${cap.frameImage}" style="max-width:280px; border-radius:6px; border:1px solid #ccc; display:block;" />` : '';
+  const headerParts = [personName?`ผู้ถูกประเมิน: ${escapeHtml(personName)}`:'', taskLabel?`งาน/ท่าที่ประเมิน: ${escapeHtml(taskLabel)}`:''].filter(Boolean);
   return `
   <div style="font-family:'Purisa','Tahoma',sans-serif; color:#16221f; max-width:720px; margin:0 auto; padding:24px;">
     <h1 style="font-size:20px; margin:0 0 2px;">Postura — รายงานผลการประเมินท่าทางการทำงาน</h1>
-    ${taskLabel?`<div style="font-size:14px; font-weight:600; color:#1f6f6b; margin-bottom:2px;">งาน/ท่าที่ประเมิน: ${escapeHtml(taskLabel)}</div>`:''}
+    ${headerParts.length?`<div style="font-size:14px; font-weight:600; color:#1f6f6b; margin-bottom:2px;">${headerParts.join(' · ')}</div>`:''}
     <div style="font-size:12px; color:#666; margin-bottom:16px;">บันทึกเมื่อ ${fmtDate(data.timestamp)} · วิเคราะห์ฝั่ง${cap.sideName==='left'?'ซ้าย':'ขวา'}ของภาพ</div>
     <div style="display:flex; gap:18px; margin-bottom:20px; flex-wrap:wrap;">
       ${img}
@@ -2259,10 +2336,11 @@ function downloadPDFReport(){
     doc.setFont('Purisa','bold'); doc.setFontSize(16);
     doc.text('Postura — รายงานผลการประเมินท่าทางการทำงาน', margin, y);
     y += 20;
-    if(data.taskLabel){
+    const headerParts = [data.personName?`ผู้ถูกประเมิน: ${data.personName}`:'', data.taskLabel?`งาน/ท่าที่ประเมิน: ${data.taskLabel}`:''].filter(Boolean);
+    if(headerParts.length){
       doc.setFont('Purisa','bold'); doc.setFontSize(12);
       doc.setTextColor(31,111,107);
-      doc.text(`งาน/ท่าที่ประเมิน: ${data.taskLabel}`, margin, y);
+      doc.text(headerParts.join('   ·   '), margin, y);
       doc.setTextColor(20);
       y += 17;
     }
