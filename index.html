@@ -383,6 +383,10 @@ footer{
             <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor" id="playIcon"><path d="M8 5v14l11-7L8 5Z"/></svg>
             <span id="playLabel">เล่น</span>
           </button>
+          <button class="btn ghost" id="switchCameraBtn" style="display:none;" title="สลับกล้องหน้า/หลัง">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 2l4 4-4 4M3 12v-2a4 4 0 0 1 4-4h14M7 22l-4-4 4-4M21 12v2a4 4 0 0 1-4 4H3"/></svg>
+            <span>สลับกล้องหลัง</span>
+          </button>
           <select class="mini" id="sideSelect" title="เลือกฝั่งร่างกายที่วิเคราะห์">
             <option value="auto">ฝั่งที่วิเคราะห์: อัตโนมัติ</option>
             <option value="left">ฝั่งที่วิเคราะห์: ซ้ายของภาพ</option>
@@ -561,6 +565,8 @@ const state = {
   lastWorldLandmarks:null,
   lastHandsResults:null,
   side:'auto',            // auto | left | right
+  usingCamera:false,
+  facingMode:'user',      // user | environment
   mirrored:false,
   worst:{},               // running max |angle| per key this session
   useWorst:false,
@@ -654,7 +660,7 @@ $('#fileInput').addEventListener('change', (e)=>{
   if(!f) return;
   startFromFile(f);
 });
-$('#cameraBtn').addEventListener('click', startFromCamera);
+$('#cameraBtn').addEventListener('click', ()=>startFromCamera('user'));
 
 function revealStage(){
   stageEl.classList.remove('is-empty');
@@ -670,6 +676,8 @@ async function startFromFile(file){
   videoEl.srcObject = null;
   videoEl.src = URL.createObjectURL(file);
   videoEl.loop = true;
+  state.usingCamera = false;
+  $('#switchCameraBtn').style.display = 'none';
   setCaptureStatus('ไฟล์วิดีโอโหลดแล้ว', 'ready');
   try{ await videoEl.play(); }catch(e){}
   state.streamActive = true;
@@ -677,25 +685,40 @@ async function startFromFile(file){
   loop();
 }
 
-async function startFromCamera(){
+async function startFromCamera(facingMode){
+  facingMode = facingMode || 'user';
   try{
-    const stream = await navigator.mediaDevices.getUserMedia({video:{facingMode:'user', width:{ideal:1280}, height:{ideal:960}}, audio:false});
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video:{facingMode:{ideal:facingMode}, width:{ideal:1280}, height:{ideal:960}}, audio:false
+    });
     stopStream();
     revealStage();
     videoEl.src='';
     videoEl.srcObject = stream;
-    state.mirrored = true;
-    $('#stageFlip').style.transform='scaleX(-1)';
+    state.usingCamera = true;
+    state.facingMode = facingMode;
+    state.mirrored = (facingMode === 'user'); // mirror the selfie camera only; back camera shows the world as-is
+    $('#stageFlip').style.transform = state.mirrored ? 'scaleX(-1)' : 'none';
+    $('#switchCameraBtn').style.display = 'inline-flex';
+    $('#switchCameraBtn span').textContent = facingMode==='user' ? 'สลับกล้องหลัง' : 'สลับกล้องหน้า';
     await videoEl.play();
-    setCaptureStatus('กล้องกำลังทำงาน', 'live');
+    setCaptureStatus(facingMode==='user' ? 'กล้องหน้ากำลังทำงาน' : 'กล้องหลังกำลังทำงาน', 'live');
     state.streamActive = true;
     setPlayUI(true);
     loop();
   }catch(e){
     console.error(e);
-    alert('ไม่สามารถเข้าถึงกล้องได้ กรุณาอนุญาตการใช้กล้องในเบราว์เซอร์');
+    if(facingMode==='environment'){
+      alert('สลับไปกล้องหลังไม่สำเร็จ — อุปกรณ์นี้อาจไม่มีกล้องหลัง หรือเบราว์เซอร์ไม่รองรับการสลับกล้อง');
+    }else{
+      alert('ไม่สามารถเข้าถึงกล้องได้ กรุณาอนุญาตการใช้กล้องในเบราว์เซอร์');
+    }
   }
 }
+$('#switchCameraBtn').addEventListener('click', ()=>{
+  if(!state.usingCamera) return;
+  startFromCamera(state.facingMode === 'user' ? 'environment' : 'user');
+});
 
 function stopStream(){
   state.streamActive = false;
