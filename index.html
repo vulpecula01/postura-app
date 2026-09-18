@@ -567,6 +567,8 @@ const state = {
   side:'auto',            // auto | left | right
   usingCamera:false,
   facingMode:'user',      // user | environment
+  videoDevices:[],
+  currentDeviceId:null,
   mirrored:false,
   worst:{},               // running max |angle| per key this session
   useWorst:false,
@@ -685,40 +687,110 @@ async function startFromFile(file){
   loop();
 }
 
+/* Common "we now have a working camera stream" bookkeeping, shared by the
+   initial open and every switch attempt so the two stay in sync. */
+async function applyStream(stream, facingHint){
+  stopStream();
+  revealStage();
+  videoEl.src = '';
+  videoEl.srcObject = stream;
+  state.usingCamera = true;
+
+  const track = stream.getVideoTracks()[0];
+  const settings = (track && track.getSettings) ? track.getSettings() : {};
+  state.currentDeviceId = settings.deviceId || state.currentDeviceId || null;
+
+  let facing = settings.facingMode || facingHint;
+  if(!facing){
+    const dev = (state.videoDevices||[]).find(d=>d.deviceId===state.currentDeviceId);
+    const label = dev && dev.label || '';
+    facing = /back|rear|environment/i.test(label) ? 'environment' : 'user';
+  }
+  state.facingMode = facing;
+  state.mirrored = (facing === 'user'); // mirror the selfie camera only; back camera shows the world as-is
+  $('#stageFlip').style.transform = state.mirrored ? 'scaleX(-1)' : 'none';
+
+  await videoEl.play();
+  setCaptureStatus(facing==='user' ? 'กล้องหน้ากำลังทำงาน' : 'กล้องหลังกำลังทำงาน', 'live');
+  state.streamActive = true;
+  setPlayUI(true);
+  loop();
+
+  // Refresh the known camera list (labels are only populated once permission
+  // is granted, which it now is) so "switch camera" knows what's available.
+  try{
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    state.videoDevices = devices.filter(d=>d.kind==='videoinput');
+  }catch(e){ /* keep whatever list we already had */ }
+  state.multipleCameras = (state.videoDevices||[]).length > 1;
+  $('#switchCameraBtn').style.display = state.multipleCameras ? 'inline-flex' : 'none';
+  $('#switchCameraBtn span').textContent = facing==='user' ? 'สลับกล้องหลัง' : 'สลับกล้องหน้า';
+}
+
+/* Pick the "other" camera by deviceId rather than facingMode. Some Android/
+   Chrome builds mis-report or mis-match facingMode:{exact:...} even when a
+   second camera clearly exists (OverconstrainedError) — deviceId is the one
+   identifier every implementation handles consistently. */
+function findOtherDeviceId(currentDeviceId){
+  const list = state.videoDevices || [];
+  if(list.length < 2) return null;
+  const current = list.find(d=>d.deviceId===currentDeviceId);
+  const currentIsBack = /back|rear|environment/i.test((current && current.label) || '');
+  const preferred = list.find(d =>
+    d.deviceId !== currentDeviceId &&
+    (currentIsBack ? /front|user|face/i.test(d.label) : /back|rear|environment/i.test(d.label))
+  );
+  if(preferred) return preferred.deviceId;
+  const idx = list.findIndex(d=>d.deviceId===currentDeviceId);
+  const next = list[(idx+1) % list.length];
+  if(next && next.deviceId !== currentDeviceId) return next.deviceId;
+  const anyOther = list.find(d=>d.deviceId!==currentDeviceId);
+  return anyOther ? anyOther.deviceId : null;
+}
+
 async function startFromCamera(facingMode){
-  facingMode = facingMode || 'user';
   try{
     const stream = await navigator.mediaDevices.getUserMedia({
-      video:{facingMode:{ideal:facingMode}, width:{ideal:1280}, height:{ideal:960}}, audio:false
+      video:{facingMode:{ideal:facingMode||'user'}, width:{ideal:1280}, height:{ideal:960}}, audio:false
     });
-    stopStream();
-    revealStage();
-    videoEl.src='';
-    videoEl.srcObject = stream;
-    state.usingCamera = true;
-    state.facingMode = facingMode;
-    state.mirrored = (facingMode === 'user'); // mirror the selfie camera only; back camera shows the world as-is
-    $('#stageFlip').style.transform = state.mirrored ? 'scaleX(-1)' : 'none';
-    $('#switchCameraBtn').style.display = 'inline-flex';
-    $('#switchCameraBtn span').textContent = facingMode==='user' ? 'สลับกล้องหลัง' : 'สลับกล้องหน้า';
-    await videoEl.play();
-    setCaptureStatus(facingMode==='user' ? 'กล้องหน้ากำลังทำงาน' : 'กล้องหลังกำลังทำงาน', 'live');
-    state.streamActive = true;
-    setPlayUI(true);
-    loop();
+    await applyStream(stream, facingMode||'user');
   }catch(e){
     console.error(e);
-    if(facingMode==='environment'){
-      alert('สลับไปกล้องหลังไม่สำเร็จ — อุปกรณ์นี้อาจไม่มีกล้องหลัง หรือเบราว์เซอร์ไม่รองรับการสลับกล้อง');
-    }else{
-      alert('ไม่สามารถเข้าถึงกล้องได้ กรุณาอนุญาตการใช้กล้องในเบราว์เซอร์');
+    alert('ไม่สามารถเข้าถึงกล้องได้ กรุณาอนุญาตการใช้กล้องในเบราว์เซอร์');
+  }
+}
+
+async function switchCamera(){
+  if(!state.usingCamera) return;
+  const previousDeviceId = state.currentDeviceId;
+  const targetId = previousDeviceId ? findOtherDeviceId(previousDeviceId) : null;
+  if(!targetId){
+    alert('ไม่พบกล้องอีกตัวในอุปกรณ์นี้ให้สลับ');
+    return;
+  }
+  try{
+    stopStream(); // release the current camera before asking for the other one
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video:{deviceId:{exact:targetId}, width:{ideal:1280}, height:{ideal:960}}, audio:false
+    });
+    await applyStream(stream, null);
+  }catch(e){
+    console.error(e);
+    alert('สลับกล้องไม่สำเร็จ — กำลังเปิดกล้องเดิมกลับให้');
+    if(previousDeviceId){
+      try{
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video:{deviceId:{exact:previousDeviceId}, width:{ideal:1280}, height:{ideal:960}}, audio:false
+        });
+        await applyStream(stream, state.facingMode);
+      }catch(e2){
+        console.error(e2);
+        alert('ไม่สามารถเปิดกล้องกลับได้ กรุณากดปุ่ม "เปิดจากกล้อง" ใหม่อีกครั้ง');
+      }
     }
   }
 }
-$('#switchCameraBtn').addEventListener('click', ()=>{
-  if(!state.usingCamera) return;
-  startFromCamera(state.facingMode === 'user' ? 'environment' : 'user');
-});
+$('#switchCameraBtn').addEventListener('click', switchCamera);
 
 function stopStream(){
   state.streamActive = false;
