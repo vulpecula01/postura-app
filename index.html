@@ -444,6 +444,7 @@ footer{
         <div class="locked-hint" id="lockedHint">
           บันทึกท่าทางจากวิดีโอด้านซ้ายก่อน ระบบจะดึงมุมข้อต่อมาคำนวณคะแนนให้อัตโนมัติ — ปรับปัจจัยเพิ่มเติม (แรง/น้ำหนัก, ระยะเวลาคงท่า, การรองรับ ฯลฯ) ได้เองในแต่ละแท็บ
         </div>
+        <div id="confidenceWarning" style="display:none; gap:10px; align-items:flex-start; margin:12px 20px 0; padding:12px 14px; border-radius:9px; background:var(--risk-mid-bg); color:var(--risk-mid); font-size:.85rem; line-height:1.5;"></div>
 
         <div class="tab-panel active" id="panel-rula"></div>
         <div class="tab-panel" id="panel-reba"></div>
@@ -486,9 +487,18 @@ footer{
           <div><div class="eyebrow">ย้อนหลัง</div><h2>ประวัติการประเมิน</h2></div>
           <button class="btn ghost" id="clearHistoryBtn" style="font-size:.78rem;">ล้างทั้งหมด</button>
         </div>
-        <div class="panel-pad" id="historyList">
+        <div class="panel-pad" style="padding-bottom:0;">
+          <div style="display:flex; gap:8px; flex-wrap:wrap; margin-bottom:14px;">
+            <button class="btn ghost" id="exportHistoryBtn" style="font-size:.82rem;">⬇️ สำรองเป็นไฟล์</button>
+            <button class="btn ghost" id="importHistoryBtn" style="font-size:.82rem;">⬆️ นำเข้าจากไฟล์</button>
+            <input type="file" id="importHistoryInput" accept="application/json,.json" style="display:none;">
+            <button class="btn ghost" id="compareHistoryBtn" style="font-size:.82rem; display:none;">🔍 เปรียบเทียบ 2 รายการที่เลือก</button>
+          </div>
+        </div>
+        <div class="panel-pad" style="padding-top:0;" id="historyList">
           <p style="color:var(--ink-soft); font-size:.85rem; margin:0;">ยังไม่มีประวัติที่บันทึกไว้ในเบราว์เซอร์นี้ — ประวัติเก็บไว้เฉพาะในเครื่อง/เบราว์เซอร์นี้เท่านั้น ไม่ถูกส่งขึ้นที่ใด</p>
         </div>
+        <div class="panel-pad" id="compareView" style="display:none; border-top:1px solid var(--line);"></div>
       </div>
     </div>
   </section>
@@ -1057,11 +1067,44 @@ function computeAngles(lm, wlm, handsBySide){
   const left = computeSideAngles(lm, src, leftHand, LM.L_SH,LM.L_EL,LM.L_WR,LM.L_INDEX,LM.L_PINKY,LM.L_HIP,LM.L_KNEE,LM.L_ANK, trunkVecDown3D);
   const right = computeSideAngles(lm, src, rightHand, LM.R_SH,LM.R_EL,LM.R_WR,LM.R_INDEX,LM.R_PINKY,LM.R_HIP,LM.R_KNEE,LM.R_ANK, trunkVecDown3D);
 
+  // --- Twist / side-bend, estimated from the 3D shoulder/hip/ear lines ---
+  // Twist = rotation around the vertical axis: compare the shoulder line to
+  // the hip line (or ear line to shoulder line, for the neck) with height
+  // (Y) zeroed out, so only the horizontal-plane rotation is measured.
+  const shoulderLine3D = vec(src[LM.L_SH], src[LM.R_SH]);
+  const hipLine3D = vec(src[LM.L_HIP], src[LM.R_HIP]);
+  const earLine3D = vec(src[LM.L_EAR], src[LM.R_EAR]);
+  const flat = (v)=>({x:v.x, y:0, z:v.z});
+  const trunkTwistAngle = angleBetween(flat(shoulderLine3D), flat(hipLine3D));
+  const neckTwistAngle = angleBetween(flat(earLine3D), flat(shoulderLine3D));
+
+  // Side-bend (lateral flexion) = tilt of one line relative to the other in
+  // the frontal (X-Y) plane — if shoulders are tilted more/differently than
+  // hips, the trunk itself is bending sideways rather than the whole body
+  // just leaning in a level camera shot.
+  const roll = (v)=> Math.atan2(v.y, v.x) * 180/Math.PI;
+  const trunkSideAngle = Math.abs(roll(shoulderLine3D) - roll(hipLine3D));
+  const neckSideAngle = Math.abs(roll(earLine3D) - roll(shoulderLine3D));
+
+  // --- Confidence: flag key landmarks the model isn't confidently seeing ---
+  const sideName = state.side==='auto' ? autoSide : state.side;
+  const checkPoints = sideName==='left'
+    ? [[LM.L_SH,'ไหล่'],[LM.L_EL,'ข้อศอก'],[LM.L_WR,'ข้อมือ'],[LM.L_HIP,'สะโพก'],[LM.L_KNEE,'เข่า'],[LM.L_ANK,'ข้อเท้า']]
+    : [[LM.R_SH,'ไหล่'],[LM.R_EL,'ข้อศอก'],[LM.R_WR,'ข้อมือ'],[LM.R_HIP,'สะโพก'],[LM.R_KNEE,'เข่า'],[LM.R_ANK,'ข้อเท้า']];
+  checkPoints.push([LM.L_EAR,'ศีรษะ'],[LM.R_EAR,'ศีรษะ']);
+  const seen = new Set();
+  const lowConfidence = [];
+  checkPoints.forEach(([idx,label])=>{
+    const v = lm[idx].visibility ?? 1;
+    if(v < 0.5 && !seen.has(label)){ seen.add(label); lowConfidence.push(label); }
+  });
+
   return {
-    trunk:{flex:trunkFlex},
-    neck:{flex:neckFlex},
+    trunk:{flex:trunkFlex, twist:trunkTwistAngle, side:trunkSideAngle},
+    neck:{flex:neckFlex, twist:neckTwistAngle, side:neckSideAngle},
     left, right, autoSide,
-    usingWorldLandmarks: !!wlm
+    usingWorldLandmarks: !!wlm,
+    lowConfidence
   };
 }
 
@@ -1154,11 +1197,30 @@ function performCapture(){
       usedHandModel: s.usedHandModel
     };
   }
+  // Twist/side-bend and confidence always come from the current frame's
+  // geometry (there's no meaningful "worst" twist to track over time the
+  // way we track worst flexion, so this uses the live reading either way).
+  snapshot.trunkTwistAngle = live.trunk.twist;
+  snapshot.trunkSideAngle = live.trunk.side;
+  snapshot.neckTwistAngle = live.neck.twist;
+  snapshot.neckSideAngle = live.neck.side;
+  snapshot.lowConfidence = live.lowConfidence || [];
   snapshot.frameImage = captureFrameImage();
   state.captured = snapshot;
 
-  // AI-suggested starting points for the ROSA screen/input fields —
-  // fully editable afterwards, just a sensible default instead of "1".
+  // AI-suggested starting points — fully editable afterwards, just sensible
+  // defaults instead of leaving every checkbox unticked by default.
+  const TWIST_THRESHOLD = 15, SIDE_THRESHOLD = 10;
+  const trunkTwistGuess = snapshot.trunkTwistAngle > TWIST_THRESHOLD;
+  const trunkSideGuess = snapshot.trunkSideAngle > SIDE_THRESHOLD;
+  const neckTwistGuess = snapshot.neckTwistAngle > TWIST_THRESHOLD;
+  const neckSideGuess = snapshot.neckSideAngle > SIDE_THRESHOLD;
+  [state.manual.rula, state.manual.reba].forEach(m=>{
+    m.trunkTwist = trunkTwistGuess; m.trunkSide = trunkSideGuess;
+    m.neckTwist = neckTwistGuess; m.neckSide = neckSideGuess;
+    m._aiTwistSide = true;
+  });
+
   const rm = state.manual.rosa;
   rm.monitorPos = snapshot.neckFlex>25 ? 3 : (snapshot.neckFlex>12 ? 2 : 1);
   rm._aiMonitor = true;
@@ -1167,6 +1229,19 @@ function performCapture(){
   rm._aiMouse = true;
 
   $('#lockedHint').innerHTML = `✅ บันทึกท่าทางแล้ว (ฝั่ง${sideName==='left'?'ซ้าย':'ขวา'}ของภาพ · ${state.useWorst?'ใช้ค่าสูงสุดที่พบในคลิป':'ใช้เฟรมปัจจุบัน'} · ${snapshot.usedHandModel?'✋ ใช้โมเดลมือช่วยวัดข้อมือละเอียด':'ใช้ค่าประมาณข้อมือจากลำตัว (ไม่พบมือชัดเจน)'}) — ปรับปัจจัยเพิ่มเติมด้านล่างแล้วดูผลคะแนนได้ทันที`;
+
+  const warnEl = $('#confidenceWarning');
+  if(warnEl){
+    if(snapshot.lowConfidence.length){
+      const uniqueParts = [...new Set(snapshot.lowConfidence)];
+      warnEl.style.display = 'flex';
+      warnEl.innerHTML = `<span style="font-size:1.1rem;">⚠️</span><span>AI มองเห็น <b>${uniqueParts.join(', ')}</b> ไม่ชัดเจนในเฟรมนี้ — ผลคะแนนของจุดนั้นอาจไม่แม่นยำ ลองถ่ายใหม่ในที่แสงสว่างขึ้น หรือปรับมุมกล้องให้เห็นจุดเหล่านี้ชัดเจนกว่านี้</span>`;
+    } else {
+      warnEl.style.display = 'none';
+      warnEl.innerHTML = '';
+    }
+  }
+
   renderAll();
   refreshReportPanel();
   return true;
@@ -1557,10 +1632,10 @@ function renderRULA(){
     <div style="font-size:.85rem; color:var(--ink-soft); margin:6px 0 16px;">คะแนนกลุ่ม A รวม: <b>${r.scoreA}</b></div>
 
     <h3 style="font-size:.95rem; margin-bottom:10px;">กลุ่ม B — คอ ลำตัว ขา</h3>
-    ${factorHTML('คอ (Neck)', r.neck, 6, `มุมก้มคอจาก AI: ${round(cap.neckFlex)}°`,
+    ${factorHTML('คอ (Neck)', r.neck, 6, `มุมก้มคอจาก AI: ${round(cap.neckFlex)}° · มุมบิดคอที่ตรวจพบ: ${round(cap.neckTwistAngle||0)}° · มุมเอียง: ${round(cap.neckSideAngle||0)}°${m._aiTwistSide?rosaAIBadge(true):''}`,
       `<label><input type="checkbox" data-m="rula.neckTwist" ${m.neckTwist?'checked':''}> คอบิด</label>
        <label><input type="checkbox" data-m="rula.neckSide" ${m.neckSide?'checked':''}> คอเอียงข้าง</label>`)}
-    ${factorHTML('ลำตัว (Trunk)', r.trunk, 6, `มุมก้มลำตัวจาก AI: ${round(cap.trunkFlex)}°`,
+    ${factorHTML('ลำตัว (Trunk)', r.trunk, 6, `มุมก้มลำตัวจาก AI: ${round(cap.trunkFlex)}° · มุมบิดลำตัวที่ตรวจพบ: ${round(cap.trunkTwistAngle||0)}° · มุมเอียง: ${round(cap.trunkSideAngle||0)}°${m._aiTwistSide?rosaAIBadge(true):''}`,
       `<label><input type="checkbox" data-m="rula.trunkTwist" ${m.trunkTwist?'checked':''}> ลำตัวบิด</label>
        <label><input type="checkbox" data-m="rula.trunkSide" ${m.trunkSide?'checked':''}> ลำตัวเอียงข้าง</label>`)}
     ${factorHTML('ขา (Legs)', r.legs, 2, 'ปรับเองหาก AI มองไม่เห็นขาชัดเจน',
@@ -1590,10 +1665,10 @@ function renderREBA(){
 
   el.innerHTML = `
     <h3 style="font-size:.95rem; margin-bottom:10px;">กลุ่ม A — ลำตัว คอ ขา</h3>
-    ${factorHTML('ลำตัว (Trunk)', r.trunk, 5, `มุมก้มลำตัวจาก AI: ${round(cap.trunkFlex)}°`,
+    ${factorHTML('ลำตัว (Trunk)', r.trunk, 5, `มุมก้มลำตัวจาก AI: ${round(cap.trunkFlex)}° · มุมบิด: ${round(cap.trunkTwistAngle||0)}° · มุมเอียง: ${round(cap.trunkSideAngle||0)}°${m._aiTwistSide?rosaAIBadge(true):''}`,
       `<label><input type="checkbox" data-m="reba.trunkTwist" ${m.trunkTwist?'checked':''}> บิด</label>
        <label><input type="checkbox" data-m="reba.trunkSide" ${m.trunkSide?'checked':''}> เอียงข้าง</label>`)}
-    ${factorHTML('คอ (Neck)', r.neck, 3, `มุมก้มคอจาก AI: ${round(cap.neckFlex)}°`,
+    ${factorHTML('คอ (Neck)', r.neck, 3, `มุมก้มคอจาก AI: ${round(cap.neckFlex)}° · มุมบิด: ${round(cap.neckTwistAngle||0)}° · มุมเอียง: ${round(cap.neckSideAngle||0)}°${m._aiTwistSide?rosaAIBadge(true):''}`,
       `<label><input type="checkbox" data-m="reba.neckTwist" ${m.neckTwist?'checked':''}> บิด</label>
        <label><input type="checkbox" data-m="reba.neckSide" ${m.neckSide?'checked':''}> เอียงข้าง</label>`)}
     ${factorHTML('ขา (Legs)', r.legs, 4, 'ปรับเองตามลักษณะการยืน/นั่ง',
@@ -1727,6 +1802,9 @@ function wireManualInputs(container, rerender){
       const [method,key] = inp.dataset.m.split('.');
       const val = inp.type==='checkbox' ? inp.checked : inp.value;
       state.manual[method][key]=val;
+      if(['trunkTwist','trunkSide','neckTwist','neckSide'].includes(key)){
+        state.manual[method]._aiTwistSide = false;
+      }
       rerender();
     });
   });
@@ -1774,6 +1852,7 @@ function persistHistory(){
   catch(e){ console.warn('history save failed (storage full or blocked)', e); return false; }
 }
 state.history = loadHistory();
+state.compareSelection = [];
 
 function escapeHtml(s){
   return String(s||'').replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -1783,6 +1862,7 @@ function renderHistory(){
   if(!el) return;
   if(!state.history.length){
     el.innerHTML = `<p style="color:var(--ink-soft); font-size:.85rem; margin:0;">ยังไม่มีประวัติที่บันทึกไว้ในเบราว์เซอร์นี้ — ประวัติเก็บไว้เฉพาะในเครื่อง/เบราว์เซอร์นี้เท่านั้น ไม่ถูกส่งขึ้นที่ใด</p>`;
+    $('#compareHistoryBtn').style.display = 'none';
     return;
   }
   el.innerHTML = state.history.map(h=>{
@@ -1790,7 +1870,9 @@ function renderHistory(){
     const dateStr = d.toLocaleDateString('th-TH') + ' ' + d.toLocaleTimeString('th-TH',{hour:'2-digit',minute:'2-digit'});
     const titleLine = h.taskLabel ? escapeHtml(h.taskLabel) : dateStr;
     const subLine = h.taskLabel ? `${dateStr} · ฝั่ง${h.sideName==='left'?'ซ้าย':'ขวา'}` : `ฝั่ง${h.sideName==='left'?'ซ้าย':'ขวา'}`;
+    const checked = state.compareSelection.includes(h.id) ? 'checked' : '';
     return `<div class="history-item" data-id="${h.id}">
+      <input type="checkbox" class="compare-check" data-compare="${h.id}" ${checked} title="เลือกเพื่อเปรียบเทียบ" style="width:19px;height:19px; accent-color:var(--accent); flex:none;">
       ${h.thumb?`<img src="${h.thumb}" alt="">`:'<div style="width:64px;height:48px;border-radius:6px;background:var(--surface-2);flex:none;"></div>'}
       <div class="meta">
         <div style="font-weight:600; font-size:.86rem;">${titleLine}</div>
@@ -1808,19 +1890,145 @@ function renderHistory(){
     btn.addEventListener('click', ()=>{
       const id = Number(btn.dataset.del);
       state.history = state.history.filter(h=>h.id!==id);
+      state.compareSelection = state.compareSelection.filter(x=>x!==id);
       persistHistory();
       renderHistory();
     });
   });
+  el.querySelectorAll('[data-compare]').forEach(cb=>{
+    cb.addEventListener('change', ()=>{
+      const id = Number(cb.dataset.compare);
+      if(cb.checked){
+        state.compareSelection.push(id);
+        if(state.compareSelection.length > 2) state.compareSelection.shift(); // keep the 2 most recently checked
+      }else{
+        state.compareSelection = state.compareSelection.filter(x=>x!==id);
+      }
+      renderHistory();
+    });
+  });
+  $('#compareHistoryBtn').style.display = state.compareSelection.length===2 ? 'inline-flex' : 'none';
 }
 
 $('#clearHistoryBtn').addEventListener('click', ()=>{
   if(!state.history.length) return;
   if(!confirm('ลบประวัติการประเมินทั้งหมดในเบราว์เซอร์นี้หรือไม่? (ไม่สามารถกู้คืนได้)')) return;
   state.history = [];
+  state.compareSelection = [];
   persistHistory();
   renderHistory();
+  $('#compareView').style.display = 'none';
 });
+
+/* ---------------------------------------------------------------------
+   Export / import history as a JSON file — history only lives in this
+   browser's localStorage otherwise, so it's gone the moment someone
+   clears site data, switches browsers, or moves from the web version to
+   the Android app (which has its own separate storage).
+--------------------------------------------------------------------- */
+$('#exportHistoryBtn').addEventListener('click', async ()=>{
+  if(!state.history.length){ alert('ยังไม่มีประวัติให้สำรอง'); return; }
+  const payload = {
+    app: 'postura', exportedAt: new Date().toISOString(),
+    version: 1, history: state.history
+  };
+  const blob = new Blob([JSON.stringify(payload, null, 2)], {type:'application/json'});
+  await saveFile(`postura-history-${Date.now()}.json`, blob);
+});
+
+$('#importHistoryBtn').addEventListener('click', ()=>{
+  $('#importHistoryInput').click();
+});
+$('#importHistoryInput').addEventListener('change', (e)=>{
+  const file = e.target.files[0];
+  if(!file) return;
+  const reader = new FileReader();
+  reader.onload = ()=>{
+    try{
+      const parsed = JSON.parse(reader.result);
+      const incoming = Array.isArray(parsed) ? parsed : parsed.history;
+      if(!Array.isArray(incoming)) throw new Error('รูปแบบไฟล์ไม่ถูกต้อง');
+      let added = 0;
+      incoming.forEach((item, i)=>{
+        if(!item || !item.rula || !item.reba || !item.rosa) return; // skip anything that doesn't look like our data
+        state.history.unshift({
+          ...item,
+          id: Date.now() + i // avoid id collisions with what's already here
+        });
+        added++;
+      });
+      state.history.sort((a,b)=> new Date(b.timestamp) - new Date(a.timestamp));
+      if(state.history.length > 100) state.history.length = 100;
+      persistHistory();
+      renderHistory();
+      alert(added ? `นำเข้าประวัติสำเร็จ ${added} รายการ` : 'ไม่พบข้อมูลประวัติที่ใช้ได้ในไฟล์นี้');
+    }catch(err){
+      console.error(err);
+      alert('อ่านไฟล์ไม่สำเร็จ — ตรวจสอบว่าเป็นไฟล์ที่ส่งออกจาก Postura');
+    }
+    e.target.value = ''; // allow re-selecting the same file later
+  };
+  reader.readAsText(file);
+});
+
+/* ---------------------------------------------------------------------
+   Side-by-side comparison of two saved history entries (e.g. before vs.
+   after adjusting a chair or desk) — highlights which one scored better.
+--------------------------------------------------------------------- */
+function compareArrow(a, b){
+  // lower score = better for all three methods
+  if(a === b) return '<span style="color:var(--ink-soft);">— เท่ากัน</span>';
+  return a < b
+    ? '<span style="color:var(--risk-good); font-weight:700;">▼ ดีขึ้น</span>'
+    : '<span style="color:var(--risk-severe); font-weight:700;">▲ แย่ลง</span>';
+}
+function compareColumn(h){
+  const d = new Date(h.timestamp);
+  const dateStr = d.toLocaleDateString('th-TH') + ' ' + d.toLocaleTimeString('th-TH',{hour:'2-digit',minute:'2-digit'});
+  return `
+    <div style="flex:1; min-width:200px;">
+      ${h.thumb?`<img src="${h.thumb}" style="width:100%; max-width:220px; border-radius:8px; border:1px solid var(--line); display:block; margin-bottom:8px;">`:''}
+      <div style="font-weight:700; margin-bottom:2px;">${h.taskLabel?escapeHtml(h.taskLabel):'(ไม่ได้ตั้งชื่องาน)'}</div>
+      <div style="font-size:.78rem; color:var(--ink-soft); margin-bottom:8px;">${dateStr}</div>
+      <table style="width:100%; font-size:.85rem; border-collapse:collapse;">
+        <tr><td style="padding:4px 0;">RULA</td><td style="text-align:right;"><span class="score-chip ${chipClass(h.rula.grand,7)}">${h.rula.grand}</span></td></tr>
+        <tr><td style="padding:4px 0;">REBA</td><td style="text-align:right;"><span class="score-chip ${chipClass(h.reba.final,15)}">${h.reba.final}</span></td></tr>
+        <tr><td style="padding:4px 0;">ROSA</td><td style="text-align:right;"><span class="score-chip ${chipClass(h.rosa.final,10)}">${h.rosa.final}</span></td></tr>
+      </table>
+    </div>`;
+}
+function renderCompareView(){
+  const view = $('#compareView');
+  if(state.compareSelection.length !== 2){ view.style.display='none'; view.innerHTML=''; return; }
+  const [idA, idB] = state.compareSelection;
+  const a = state.history.find(h=>h.id===idA);
+  const b = state.history.find(h=>h.id===idB);
+  if(!a || !b){ view.style.display='none'; return; }
+  // show older one first, newer one second (reads left-to-right as "before -> after")
+  const [older, newer] = new Date(a.timestamp) <= new Date(b.timestamp) ? [a,b] : [b,a];
+  view.style.display = 'block';
+  view.innerHTML = `
+    <h3 style="font-size:.95rem; margin-bottom:12px;">เปรียบเทียบ: ก่อน → หลัง</h3>
+    <div style="display:flex; gap:20px; flex-wrap:wrap; margin-bottom:14px;">
+      ${compareColumn(older)}
+      <div style="display:flex; flex-direction:column; justify-content:center; align-items:center; gap:10px; font-size:.82rem; min-width:90px;">
+        <div>RULA ${compareArrow(newer.rula.grand, older.rula.grand)}</div>
+        <div>REBA ${compareArrow(newer.reba.final, older.reba.final)}</div>
+        <div>ROSA ${compareArrow(newer.rosa.final, older.rosa.final)}</div>
+      </div>
+      ${compareColumn(newer)}
+    </div>
+    <button class="btn ghost" id="closeCompareBtn" style="font-size:.82rem;">ปิดการเปรียบเทียบ</button>
+  `;
+  const closeBtn = $('#closeCompareBtn');
+  if(closeBtn) closeBtn.addEventListener('click', ()=>{
+    state.compareSelection = [];
+    renderHistory();
+    view.style.display = 'none';
+    view.innerHTML = '';
+  });
+}
+$('#compareHistoryBtn').addEventListener('click', renderCompareView);
 
 $('#saveHistoryBtn').addEventListener('click', async ()=>{
   if(!state.captured) return;
